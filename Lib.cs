@@ -262,6 +262,9 @@ public static partial class Module
             });
         }
 
+        // log
+        Log.Info($"Player: {player.player_id} - has left room {player.room_id}");
+
         player.room_id = uint.MaxValue;
         player.last_position = new DbVector3(0, 0, 0);
         player.last_rotation = 0;
@@ -332,13 +335,11 @@ public static partial class Module
     }
 
     [Reducer]
-    public static void SendVoice(ReducerContext ctx, uint room_id, byte[] audio_data)
+    public static void SendVoice(ReducerContext ctx, byte[] audio_data)
     {
         var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player must be in a room to send a voice clip");
-        if (player.room_id != room_id)
-            throw new Exception("Player is not in the specified room");
 
         // If identity is in voice table, update it else insert
         var existingClip = ctx.Db.voice_clip.sender.Find(ctx.Sender);
@@ -355,7 +356,7 @@ public static partial class Module
             ctx.Db.voice_clip.Insert(new VoiceClip
             {
                 sender = ctx.Sender,
-                room_id = room_id,
+                room_id = player.room_id,
                 timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
                 audio_data = audio_data
             });
