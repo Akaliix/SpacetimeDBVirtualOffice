@@ -16,6 +16,10 @@ public static partial class Module
 
         [SpacetimeDB.Index.BTree]
         public uint room_id;
+        public ulong last_room_join_time; // Time when the player joined the room
+
+        public ulong last_connect_time; // Time when the player joined the room
+        public ulong total_play_time; // Total time spent in the room
 
         public DbVector3 last_position;
         public float last_rotation;
@@ -50,9 +54,8 @@ public static partial class Module
         public uint player_id;
         public string name;
         public string color;
-        public uint room_id;
-        public DbVector3 last_position;
-        public float last_rotation;
+        public ulong last_disconnect_time; // Time when the player left the room
+        public ulong total_play_time; // Total time spent in the room
     }
 
     [Table(Name = "game_room", Public = true)]
@@ -81,6 +84,36 @@ public static partial class Module
         public string data;
     }
 
+    [Table(Name = "chat_message", Public = true)]
+    public partial struct ChatMessage
+    {
+        [PrimaryKey, AutoInc]
+        public uint message_id;
+
+        public Identity sender;
+
+        [SpacetimeDB.Index.BTree]
+        public uint room_id;
+
+        public string content;
+        public bool shout;
+        public ulong timestamp;
+    }
+
+    [Table(Name = "voice_clip", Public = true)]
+    public partial struct VoiceClip
+    {
+        [PrimaryKey]
+        public Identity sender;
+
+        [SpacetimeDB.Index.BTree]
+        public uint room_id;
+
+        public ulong timestamp;     // when recorded (microseconds)
+        public byte[] audio_data;   // raw PCM WAV bytes
+    }
+
+
     // -------------------------
     // Reducers
     // -------------------------
@@ -107,8 +140,9 @@ public static partial class Module
                 name = player.Value.name,
                 color = player.Value.color,
                 room_id = uint.MaxValue,
-                last_position = player.Value.last_position,
-                last_rotation = player.Value.last_rotation
+                last_position = new DbVector3(0, 0, 0),
+                last_rotation = 0,
+                last_connect_time = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
             });
             ctx.Db.logged_out_player.identity.Delete(player.Value.identity);
         }
@@ -117,11 +151,12 @@ public static partial class Module
             ctx.Db.online_player.Insert(new OnlinePlayer
             {
                 identity = ctx.Sender,
-                name = "",
+                name = "guest",
                 color = "#FFFFFF",
                 room_id = uint.MaxValue,
                 last_position = new DbVector3(0, 0, 0),
-                last_rotation = 0
+                last_rotation = 0,
+                last_connect_time = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
             });
         }
 
@@ -135,15 +170,16 @@ public static partial class Module
         var count = ctx.Db.player_count.id.Find(0) ?? throw new Exception("Player count not initialized");
 
         var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+
+        ulong currentTime = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
         ctx.Db.logged_out_player.Insert(new LoggedOutPlayer
         {
             identity = player.identity,
             player_id = player.player_id,
             name = player.name,
             color = player.color,
-            room_id = player.room_id,
-            last_position = player.last_position,
-            last_rotation = player.last_rotation
+            last_disconnect_time = currentTime,
+            total_play_time = player.total_play_time + (currentTime - player.last_connect_time)
         });
         ctx.Db.online_player.identity.Delete(player.identity);
 
@@ -193,6 +229,7 @@ public static partial class Module
         player.room_id = room_id;
         player.last_position = savedPos?.last_position ?? new DbVector3(0, 0, 0);
         player.last_rotation = savedPos?.last_rotation ?? 0;
+        player.last_room_join_time = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
         ctx.Db.online_player.identity.Update(player);
     }
 
@@ -277,9 +314,51 @@ public static partial class Module
         }
     }
 
-    //[Reducer]
-    //public static void RemoveEntity(ReducerContext ctx, uint room_id)
-    //{
-    //    ctx.Db.room_entity.room_id.Delete(room_id);
-    //}
+    [Reducer]
+    public static void SendMessage(ReducerContext ctx, string content, bool shout)
+    {
+        var sender = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        if (sender.room_id == uint.MaxValue)
+            throw new Exception("Player must be in a room to send a message");
+
+        ctx.Db.chat_message.Insert(new ChatMessage
+        {
+            sender = ctx.Sender,
+            room_id = sender.room_id,
+            content = content,
+            shout = shout,
+            timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
+        });
+    }
+
+    [Reducer]
+    public static void SendVoice(ReducerContext ctx, uint room_id, byte[] audio_data)
+    {
+        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        if (player.room_id == uint.MaxValue)
+            throw new Exception("Player must be in a room to send a voice clip");
+        if (player.room_id != room_id)
+            throw new Exception("Player is not in the specified room");
+
+        // If identity is in voice table, update it else insert
+        var existingClip = ctx.Db.voice_clip.sender.Find(ctx.Sender);
+
+        if (existingClip != null)
+        {
+            VoiceClip existingClipValue = existingClip.Value;
+            existingClipValue.audio_data = audio_data;
+            existingClipValue.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+            ctx.Db.voice_clip.sender.Update(existingClipValue);
+        }
+        else
+        {
+            ctx.Db.voice_clip.Insert(new VoiceClip
+            {
+                sender = ctx.Sender,
+                room_id = room_id,
+                timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
+                audio_data = audio_data
+            });
+        }
+    }
 }
