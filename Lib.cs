@@ -18,6 +18,7 @@ public static partial class Module
         public uint room_id;
 
         public DbVector3 last_position;
+        public float last_rotation;
     }
 
     [Table(Name = "player_room_position", Public = true)]
@@ -29,6 +30,7 @@ public static partial class Module
         public Identity identity;
         public uint room_id;
         public DbVector3 last_position;
+        public float last_rotation;
     }
 
     [Table(Name = "player_count", Public = true)]
@@ -50,6 +52,7 @@ public static partial class Module
         public string color;
         public uint room_id;
         public DbVector3 last_position;
+        public float last_rotation;
     }
 
     [Table(Name = "game_room", Public = true)]
@@ -72,14 +75,10 @@ public static partial class Module
     [Table(Name = "room_entity", Public = true)]
     public partial struct RoomEntity
     {
-        [PrimaryKey, AutoInc]
-        public uint entity_id;
-        [SpacetimeDB.Index.BTree]
+        [PrimaryKey]
         public uint room_id;
-        public string prefab_id;
-        public DbVector3 position;
-        public DbVector3 rotation;
-        public DbVector3 scale;
+        public Identity identity; // The identity of the player who updated the entity
+        public string data;
     }
 
     // -------------------------
@@ -108,7 +107,8 @@ public static partial class Module
                 name = player.Value.name,
                 color = player.Value.color,
                 room_id = uint.MaxValue,
-                last_position = player.Value.last_position
+                last_position = player.Value.last_position,
+                last_rotation = player.Value.last_rotation
             });
             ctx.Db.logged_out_player.identity.Delete(player.Value.identity);
         }
@@ -120,7 +120,8 @@ public static partial class Module
                 name = "",
                 color = "#FFFFFF",
                 room_id = uint.MaxValue,
-                last_position = new DbVector3(0, 0, 0)
+                last_position = new DbVector3(0, 0, 0),
+                last_rotation = 0
             });
         }
 
@@ -141,7 +142,8 @@ public static partial class Module
             name = player.name,
             color = player.color,
             room_id = player.room_id,
-            last_position = player.last_position
+            last_position = player.last_position,
+            last_rotation = player.last_rotation
         });
         ctx.Db.online_player.identity.Delete(player.identity);
 
@@ -190,6 +192,7 @@ public static partial class Module
 
         player.room_id = room_id;
         player.last_position = savedPos?.last_position ?? new DbVector3(0, 0, 0);
+        player.last_rotation = savedPos?.last_rotation ?? 0;
         ctx.Db.online_player.identity.Update(player);
     }
 
@@ -207,6 +210,7 @@ public static partial class Module
         {
             PlayerRoomPosition savedPoss = savedPos.Value;
             savedPoss.last_position = player.last_position;
+            savedPoss.last_rotation = player.last_rotation;
             ctx.Db.player_room_position.identity_room_key.Update(savedPoss);
         }
         else
@@ -216,12 +220,14 @@ public static partial class Module
                 identity = ctx.Sender,
                 room_id = player.room_id,
                 last_position = player.last_position,
+                last_rotation = player.last_rotation,
                 identity_room_key = key
             });
         }
 
         player.room_id = uint.MaxValue;
         player.last_position = new DbVector3(0, 0, 0);
+        player.last_rotation = 0;
         ctx.Db.online_player.identity.Update(player);
     }
 
@@ -235,50 +241,45 @@ public static partial class Module
     }
 
     [Reducer]
-    public static void UpdateLastPosition(ReducerContext ctx, DbVector3 position)
+    public static void UpdateLastPosition(ReducerContext ctx, DbVector3 position, float rotation)
     {
         var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player must join a room first");
         player.last_position = position;
+        player.last_rotation = rotation;
         ctx.Db.online_player.identity.Update(player);
-
-        // Save per-room position
-        //var key = $"{ctx.Sender}|{player.room_id}";
-        //var savedPos = ctx.Db.player_room_position.identity_room_key.Find(key);
-        //if (savedPos != null)
-        //{
-        //    PlayerRoomPosition savedPoss = savedPos.Value;
-        //    savedPoss.last_position = position;
-        //    ctx.Db.player_room_position.identity_room_key.Update(savedPoss);
-        //}
-        //else
-        //{
-        //    ctx.Db.player_room_position.Insert(new PlayerRoomPosition
-        //    {
-        //        identity = ctx.Sender,
-        //        room_id = player.room_id,
-        //        last_position = position,
-        //        identity_room_key = key
-        //    });
-        //}
     }
+
     [Reducer]
-    public static void AddEntity(ReducerContext ctx, uint room_id, string prefab_id, DbVector3 pos, DbVector3 rot, DbVector3 scale)
+    public static void SaveEntity(ReducerContext ctx, uint room_id, string data)
     {
-        ctx.Db.room_entity.Insert(new RoomEntity
+        var room = ctx.Db.game_room.room_id.Find(room_id) ?? throw new Exception("Room not found");
+        // Check if the entity already exists
+        var existingEntity = ctx.Db.room_entity.room_id.Find(room_id);
+        if (existingEntity != null)
         {
-            room_id = room_id,
-            prefab_id = prefab_id,
-            position = pos,
-            rotation = rot,
-            scale = scale
-        });
+            // Update the existing entity
+            RoomEntity existingEntityValue = existingEntity.Value;
+            existingEntityValue.data = data;
+            existingEntityValue.identity = ctx.Sender;
+            ctx.Db.room_entity.room_id.Update(existingEntityValue);
+        }
+        else
+        {
+            // Insert a new entity
+            ctx.Db.room_entity.Insert(new RoomEntity
+            {
+                room_id = room_id,
+                identity = ctx.Sender,
+                data = data
+            });
+        }
     }
 
-    [Reducer]
-    public static void RemoveEntity(ReducerContext ctx, uint entity_id)
-    {
-        ctx.Db.room_entity.entity_id.Delete(entity_id);
-    }
+    //[Reducer]
+    //public static void RemoveEntity(ReducerContext ctx, uint room_id)
+    //{
+    //    ctx.Db.room_entity.room_id.Delete(room_id);
+    //}
 }
