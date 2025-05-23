@@ -113,6 +113,30 @@ public static partial class Module
         public byte[] audio_data;   // raw PCM WAV bytes
     }
 
+    [Table(Name = "images", Public = true)]
+    public partial struct Images
+    {
+        [PrimaryKey, AutoInc]
+        public uint image_id;
+
+        [Unique]
+        public string building_identifier; // Unique identifier for the building
+
+        [SpacetimeDB.Index.BTree]
+        public uint room_id;
+
+        public byte[] image_data; // raw image bytes
+    }
+
+    [Table(Name = "image_broadcast_lock", Public = true)]
+    public partial struct ImageBroadcastLock
+    {
+        [Unique]
+        public uint image_id; // Unique identifier for the image broadcast lock
+        public Identity sender; // The identity of the player who is broadcasting the image
+        public ulong timestamp; // when recorded (microseconds)
+    }
+
 
     // -------------------------
     // Reducers
@@ -359,6 +383,57 @@ public static partial class Module
                 room_id = player.room_id,
                 timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
                 audio_data = audio_data
+            });
+        }
+    }
+
+    [Reducer]
+    public static void SendImage(ReducerContext ctx, string building_identifier, byte[] image_data)
+    {
+        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        if (player.room_id == uint.MaxValue)
+            throw new Exception("Player must be in a room to send an image");
+        // If identity is in image table, update it else insert
+        var existingImage = ctx.Db.images.building_identifier.Find(building_identifier);
+        if (existingImage != null)
+        {
+            Images existingImageValue = existingImage.Value;
+            existingImageValue.image_data = image_data;
+            ctx.Db.images.building_identifier.Update(existingImageValue);
+        }
+        else
+        {
+            ctx.Db.images.Insert(new Images
+            {
+                building_identifier = building_identifier,
+                room_id = player.room_id,
+                image_data = image_data
+            });
+        }
+    }
+
+    [Reducer]
+    public static void LockImageBroadcast(ReducerContext ctx, uint image_id)
+    {
+        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        if (player.room_id == uint.MaxValue)
+            throw new Exception("Player must be in a room to lock image broadcast");
+        // If identity is in image table, update it else insert
+        var existingLock = ctx.Db.image_broadcast_lock.image_id.Find(image_id);
+        if (existingLock != null)
+        {
+            ImageBroadcastLock existingLockValue = existingLock.Value;
+            existingLockValue.sender = ctx.Sender;
+            existingLockValue.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+            ctx.Db.image_broadcast_lock.image_id.Update(existingLockValue);
+        }
+        else
+        {
+            ctx.Db.image_broadcast_lock.Insert(new ImageBroadcastLock
+            {
+                image_id = image_id,
+                sender = ctx.Sender,
+                timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
             });
         }
     }
