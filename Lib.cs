@@ -116,23 +116,27 @@ public static partial class Module
     [Table(Name = "images", Public = true)]
     public partial struct Images
     {
-        [PrimaryKey, AutoInc]
-        public uint image_id;
-
-        [Unique]
+        [PrimaryKey]
         public string building_identifier; // Unique identifier for the building
 
         [SpacetimeDB.Index.BTree]
         public uint room_id;
 
+        public ulong timestamp;
+
+        public Identity sender; // The identity of the player who is broadcasting the image
+
+        public int width;  // Width of the image
+        public int height; // Height of the image
         public byte[] image_data; // raw image bytes
     }
 
     [Table(Name = "image_broadcast_lock", Public = true)]
     public partial struct ImageBroadcastLock
     {
-        [Unique]
-        public uint image_id; // Unique identifier for the image broadcast lock
+        [PrimaryKey]
+        public string building_identifier; // Unique identifier for the image broadcast lock
+        [SpacetimeDB.Index.BTree]
         public Identity sender; // The identity of the player who is broadcasting the image
         public ulong timestamp; // when recorded (microseconds)
     }
@@ -388,7 +392,7 @@ public static partial class Module
     }
 
     [Reducer]
-    public static void SendImage(ReducerContext ctx, string building_identifier, byte[] image_data)
+    public static void SendImage(ReducerContext ctx, string building_identifier, byte[] image_data, int width, int height)
     {
         var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
@@ -397,8 +401,15 @@ public static partial class Module
         var existingImage = ctx.Db.images.building_identifier.Find(building_identifier);
         if (existingImage != null)
         {
+            if (existingImage.Value.room_id != player.room_id)
+                throw new Exception("Cannot update image for a building that is not in the same room");
+
             Images existingImageValue = existingImage.Value;
             existingImageValue.image_data = image_data;
+            existingImageValue.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+            existingImageValue.sender = ctx.Sender;
+            existingImageValue.width = width;
+            existingImageValue.height = height;
             ctx.Db.images.building_identifier.Update(existingImageValue);
         }
         else
@@ -407,31 +418,41 @@ public static partial class Module
             {
                 building_identifier = building_identifier,
                 room_id = player.room_id,
+                timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
+                sender = ctx.Sender,
+                width = width,
+                height = height,
                 image_data = image_data
             });
         }
     }
 
     [Reducer]
-    public static void LockImageBroadcast(ReducerContext ctx, uint image_id)
+    public static void LockImageBroadcast(ReducerContext ctx, string building_identifier)
     {
         var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player must be in a room to lock image broadcast");
+
+        // make sure player is in the same room as image
+        Images images = ctx.Db.images.building_identifier.Find(building_identifier) ?? throw new Exception("Image not found");
+        if (images.room_id != player.room_id)
+            throw new Exception("Cannot lock image broadcast for a building that is not in the same room");
+
         // If identity is in image table, update it else insert
-        var existingLock = ctx.Db.image_broadcast_lock.image_id.Find(image_id);
+        var existingLock = ctx.Db.image_broadcast_lock.building_identifier.Find(building_identifier);
         if (existingLock != null)
         {
             ImageBroadcastLock existingLockValue = existingLock.Value;
             existingLockValue.sender = ctx.Sender;
             existingLockValue.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
-            ctx.Db.image_broadcast_lock.image_id.Update(existingLockValue);
+            ctx.Db.image_broadcast_lock.building_identifier.Update(existingLockValue);
         }
         else
         {
             ctx.Db.image_broadcast_lock.Insert(new ImageBroadcastLock
             {
-                image_id = image_id,
+                building_identifier = building_identifier,
                 sender = ctx.Sender,
                 timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
             });
