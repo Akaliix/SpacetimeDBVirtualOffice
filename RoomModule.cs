@@ -8,7 +8,8 @@ public static partial class RoomModule
         [PrimaryKey, AutoInc]
         public uint room_id;
         public string name;
-        // Password is no longer included here
+        public uint created_by_user_id; // Track who created the room
+        public ulong created_at;
     }
 
     [Table(Name = "game_room_secret")]
@@ -24,25 +25,36 @@ public static partial class RoomModule
     {
         [PrimaryKey]
         public uint room_id;
-        public Identity identity; // The identity of the player who updated the entity
+        public uint user_id; // The user who updated the entity
         public string data;
+        public ulong last_updated;
     }
 
     [Table(Name = "player_room_position")]
     public partial struct PlayerRoomPosition
     {
         [PrimaryKey]
-        public string identity_room_key; // Example: "playerIdentity|roomId"
+        public string user_room_key; // Example: "userId|roomId"
 
-        public Identity identity;
+        public uint user_id;
         public uint room_id;
         public DbVector3 last_position;
         public float last_rotation;
+        public ulong last_updated;
     }
 
     [Reducer]
     public static void CreateRoom(ReducerContext ctx, string room_name, string password)
     {
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        // Validate input
+        if (string.IsNullOrWhiteSpace(room_name) || room_name.Length < 3 || room_name.Length > 50)
+            throw new Exception("Room name must be between 3 and 50 characters");
+
+        if (string.IsNullOrWhiteSpace(password) || password.Length < 3)
+            throw new Exception("Password must be at least 3 characters");
+
         foreach (var room in ctx.Db.game_room.Iter())
         {
             if (room.name == room_name)
@@ -51,7 +63,9 @@ public static partial class RoomModule
 
         var newRoom = new GameRoom
         {
-            name = room_name
+            name = room_name,
+            created_by_user_id = user_id,
+            created_at = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
         };
 
         var result = ctx.Db.game_room.Insert(newRoom);
@@ -62,81 +76,101 @@ public static partial class RoomModule
             room_id = result.room_id,
             password = password
         });
+
+        Log.Info($"Room created: {room_name} by user {user_id}");
     }
 
     [Reducer]
     public static void JoinRoom(ReducerContext ctx, uint room_id, string password)
     {
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
         var room = ctx.Db.game_room.room_id.Find(room_id) ?? throw new Exception("Room not found");
         var roomSecret = ctx.Db.game_room_secret.room_id.Find(room_id) ?? throw new Exception("Room secret not found");
+
         if (roomSecret.password != password)
             throw new Exception("Incorrect password");
 
-        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
-        player.room_id = room_id;
-        //var key = $"{ctx.Sender}|{room_id}";
-        var key = MakeKey(ctx.Sender, room_id);
-        var savedPos = ctx.Db.player_room_position.identity_room_key.Find(key);
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
 
-        player.room_id = room_id;
-        player.last_position = savedPos?.last_position ?? new DbVector3(0, 0, 0);
-        player.last_rotation = savedPos?.last_rotation ?? 0;
-        player.last_room_join_time = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
-        ctx.Db.online_player.identity.Update(player);
+        var key = MakeKey(user_id, room_id);
+        var savedPos = ctx.Db.player_room_position.user_room_key.Find(key);
+
+        var updatedPlayer = player;
+        updatedPlayer.room_id = room_id;
+        updatedPlayer.last_position = savedPos?.last_position ?? new DbVector3(0, 0, 0);
+        updatedPlayer.last_rotation = savedPos?.last_rotation ?? 0;
+        updatedPlayer.last_room_join_time = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+        ctx.Db.online_player.user_id.Update(updatedPlayer);
+
+        Log.Info($"User {user_id} joined room {room_id}");
     }
 
     [Reducer]
     public static void LeaveRoom(ReducerContext ctx)
     {
-        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player is not in a room");
 
         // Save the player's position in the room
-        //var key = $"{ctx.Sender}|{player.room_id}";
-        var key = MakeKey(ctx.Sender, player.room_id);
-        var savedPos = ctx.Db.player_room_position.identity_room_key.Find(key);
+        var key = MakeKey(user_id, player.room_id);
+        var savedPos = ctx.Db.player_room_position.user_room_key.Find(key);
+
         if (savedPos != null)
         {
-            PlayerRoomPosition savedPoss = savedPos.Value;
-            savedPoss.last_position = player.last_position;
-            savedPoss.last_rotation = player.last_rotation;
-            ctx.Db.player_room_position.identity_room_key.Update(savedPoss);
+            var updatedPos = savedPos.Value;
+            updatedPos.last_position = player.last_position;
+            updatedPos.last_rotation = player.last_rotation;
+            updatedPos.last_updated = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+            ctx.Db.player_room_position.user_room_key.Update(updatedPos);
         }
         else
         {
             ctx.Db.player_room_position.Insert(new PlayerRoomPosition
             {
-                identity = ctx.Sender,
+                user_id = user_id,
                 room_id = player.room_id,
                 last_position = player.last_position,
                 last_rotation = player.last_rotation,
-                identity_room_key = key
+                user_room_key = key,
+                last_updated = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
             });
         }
 
-        // log
-        Log.Info($"Player: {player.player_id} - has left room {player.room_id}");
+        Log.Info($"User {user_id} left room {player.room_id}");
 
-        player.room_id = uint.MaxValue;
-        player.last_position = new DbVector3(0, 0, 0);
-        player.last_rotation = 0;
-        ctx.Db.online_player.identity.Update(player);
+        var updatedPlayer = player;
+        updatedPlayer.room_id = uint.MaxValue;
+        updatedPlayer.last_position = new DbVector3(0, 0, 0);
+        updatedPlayer.last_rotation = 0;
+        ctx.Db.online_player.user_id.Update(updatedPlayer);
     }
 
     [Reducer]
     public static void SaveEntity(ReducerContext ctx, uint room_id, string data)
     {
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
         var room = ctx.Db.game_room.room_id.Find(room_id) ?? throw new Exception("Room not found");
+
+        // Verify player is in the room
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
+        if (player.room_id != room_id)
+            throw new Exception("Player must be in the room to save entities");
+
         // Check if the entity already exists
         var existingEntity = ctx.Db.room_entity.room_id.Find(room_id);
         if (existingEntity != null)
         {
             // Update the existing entity
-            RoomEntity existingEntityValue = existingEntity.Value;
-            existingEntityValue.data = data;
-            existingEntityValue.identity = ctx.Sender;
-            ctx.Db.room_entity.room_id.Update(existingEntityValue);
+            var updatedEntity = existingEntity.Value;
+            updatedEntity.data = data;
+            updatedEntity.user_id = user_id;
+            updatedEntity.last_updated = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+            ctx.Db.room_entity.room_id.Update(updatedEntity);
         }
         else
         {
@@ -144,11 +178,12 @@ public static partial class RoomModule
             ctx.Db.room_entity.Insert(new RoomEntity
             {
                 room_id = room_id,
-                identity = ctx.Sender,
-                data = data
+                user_id = user_id,
+                data = data,
+                last_updated = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
             });
         }
     }
 
-    public static string MakeKey(Identity identity, uint roomId) => $"{identity.ToString()}|{roomId}";
+    public static string MakeKey(uint user_id, uint roomId) => $"{user_id}|{roomId}";
 }

@@ -6,20 +6,18 @@ public static partial class PlayerModule
     public partial struct OnlinePlayer
     {
         [PrimaryKey]
-        public Identity identity;
+        public uint user_id;
 
-        [Unique, AutoInc]
-        public uint player_id;
-
-        public string name;
+        public Identity identity; // Keep for connection tracking
+        public string username;
         public string color;
 
         [SpacetimeDB.Index.BTree]
         public uint room_id;
         public ulong last_room_join_time; // Time when the player joined the room
 
-        public ulong last_connect_time; // Time when the player joined the room
-        public ulong total_play_time; // Total time spent in the room
+        public ulong last_connect_time; // Time when the player connected
+        public ulong total_play_time; // Total time spent online
 
         public DbVector3 last_position;
         public float last_rotation;
@@ -37,35 +35,50 @@ public static partial class PlayerModule
     public partial struct LoggedOutPlayer
     {
         [PrimaryKey]
-        public Identity identity;
+        public uint user_id;
 
-        public uint player_id;
-        public string name;
+        public string username;
         public string color;
-        public ulong last_disconnect_time; // Time when the player left the room
-        public ulong total_play_time; // Total time spent in the room
+        public ulong last_disconnect_time; // Time when the player left
+        public ulong total_play_time; // Total time spent online
     }
 
     // Player-related reducers
     [Reducer]
-    public static void SetPlayerProfile(ReducerContext ctx, string name, string color)
+    public static void SetPlayerProfile(ReducerContext ctx, string color)
     {
-        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
-        player.name = name;
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
         player.color = color;
-        ctx.Db.online_player.identity.Update(player);
+        ctx.Db.online_player.user_id.Update(player);
     }
 
     [Reducer]
     public static void UpdateLastPosition(ReducerContext ctx, DbVector3 position, float rotation)
     {
-        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player must join a room first");
         player.last_position = position;
         player.last_rotation = rotation;
-        ctx.Db.online_player.identity.Update(player);
+        ctx.Db.online_player.user_id.Update(player);
     }
 
-    public static string MakeKey(Identity identity, uint roomId) => $"{identity.ToString()}|{roomId}";
+    public static string MakeKey(uint user_id, uint roomId) => $"{user_id}|{roomId}";
+
+    // Helper method to get online player by user_id
+    public static OnlinePlayer? GetOnlinePlayer(ReducerContext ctx, uint user_id)
+    {
+        return ctx.Db.online_player.user_id.Find(user_id);
+    }
+
+    // Helper method to get authenticated player
+    public static OnlinePlayer GetAuthenticatedPlayer(ReducerContext ctx)
+    {
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+        return ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
+    }
 }

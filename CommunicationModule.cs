@@ -8,7 +8,8 @@ public static partial class CommunicationModule
         [PrimaryKey, AutoInc]
         public uint message_id;
 
-        public Identity sender;
+        public uint sender_user_id;
+        public string sender_username;
 
         [SpacetimeDB.Index.BTree]
         public uint room_id;
@@ -22,11 +23,12 @@ public static partial class CommunicationModule
     public partial struct VoiceClip
     {
         [PrimaryKey]
-        public Identity sender;
+        public uint sender_user_id;
 
         [SpacetimeDB.Index.BTree]
         public uint room_id;
 
+        public string sender_username;
         public ulong timestamp;     // when recorded (microseconds)
         public byte[] audio_data;   // raw PCM WAV bytes
     }
@@ -42,7 +44,8 @@ public static partial class CommunicationModule
 
         public ulong timestamp;
 
-        public Identity sender; // The identity of the player who is broadcasting the image
+        public uint sender_user_id; // The user ID of the player who is broadcasting the image
+        public string sender_username;
 
         public int width;  // Width of the image
         public int height; // Height of the image
@@ -54,23 +57,33 @@ public static partial class CommunicationModule
     {
         [PrimaryKey]
         public string building_identifier; // Unique identifier for the image broadcast lock
+
         [SpacetimeDB.Index.BTree]
-        public Identity sender; // The identity of the player who is broadcasting the image
+        public uint sender_user_id; // The user ID of the player who is broadcasting the image
+
+        public string sender_username;
         public ulong timestamp; // when recorded (microseconds)
     }
 
     [Reducer]
     public static void SendMessage(ReducerContext ctx, string content, bool shout)
     {
-        var sender = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        var sender = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
         if (sender.room_id == uint.MaxValue)
             throw new Exception("Player must be in a room to send a message");
 
+        // Validate message content
+        if (string.IsNullOrWhiteSpace(content) || content.Length > 500)
+            throw new Exception("Message must be between 1 and 500 characters");
+
         ctx.Db.chat_message.Insert(new ChatMessage
         {
-            sender = ctx.Sender,
+            sender_user_id = user_id,
+            sender_username = sender.username,
             room_id = sender.room_id,
-            content = content,
+            content = content.Trim(),
             shout = shout,
             timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
         });
@@ -79,25 +92,33 @@ public static partial class CommunicationModule
     [Reducer]
     public static void SendVoice(ReducerContext ctx, byte[] audio_data)
     {
-        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player must be in a room to send a voice clip");
 
-        // If identity is in voice table, update it else insert
-        var existingClip = ctx.Db.voice_clip.sender.Find(ctx.Sender);
+        // Validate audio data
+        if (audio_data == null || audio_data.Length == 0 || audio_data.Length > 1024 * 1024) // 1MB limit
+            throw new Exception("Invalid audio data size");
+
+        // If user already has a voice clip, update it, else insert
+        var existingClip = ctx.Db.voice_clip.sender_user_id.Find(user_id);
 
         if (existingClip != null)
         {
-            VoiceClip existingClipValue = existingClip.Value;
-            existingClipValue.audio_data = audio_data;
-            existingClipValue.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
-            ctx.Db.voice_clip.sender.Update(existingClipValue);
+            var updatedClip = existingClip.Value;
+            updatedClip.audio_data = audio_data;
+            updatedClip.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+            updatedClip.room_id = player.room_id;
+            ctx.Db.voice_clip.sender_user_id.Update(updatedClip);
         }
         else
         {
             ctx.Db.voice_clip.Insert(new VoiceClip
             {
-                sender = ctx.Sender,
+                sender_user_id = user_id,
+                sender_username = player.username,
                 room_id = player.room_id,
                 timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
                 audio_data = audio_data
@@ -108,23 +129,37 @@ public static partial class CommunicationModule
     [Reducer]
     public static void SendImage(ReducerContext ctx, string building_identifier, byte[] image_data, int width, int height)
     {
-        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player must be in a room to send an image");
-        // If identity is in image table, update it else insert
+
+        // Validate input
+        if (string.IsNullOrWhiteSpace(building_identifier) || building_identifier.Length > 100)
+            throw new Exception("Invalid building identifier");
+
+        if (image_data == null || image_data.Length == 0 || image_data.Length > 5 * 1024 * 1024) // 5MB limit
+            throw new Exception("Invalid image data size");
+
+        if (width <= 0 || height <= 0 || width > 4096 || height > 4096)
+            throw new Exception("Invalid image dimensions");
+
+        // If image exists, update it, else insert
         var existingImage = ctx.Db.images.building_identifier.Find(building_identifier);
         if (existingImage != null)
         {
             if (existingImage.Value.room_id != player.room_id)
                 throw new Exception("Cannot update image for a building that is not in the same room");
 
-            Images existingImageValue = existingImage.Value;
-            existingImageValue.image_data = image_data;
-            existingImageValue.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
-            existingImageValue.sender = ctx.Sender;
-            existingImageValue.width = width;
-            existingImageValue.height = height;
-            ctx.Db.images.building_identifier.Update(existingImageValue);
+            var updatedImage = existingImage.Value;
+            updatedImage.image_data = image_data;
+            updatedImage.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+            updatedImage.sender_user_id = user_id;
+            updatedImage.sender_username = player.username;
+            updatedImage.width = width;
+            updatedImage.height = height;
+            ctx.Db.images.building_identifier.Update(updatedImage);
         }
         else
         {
@@ -133,7 +168,8 @@ public static partial class CommunicationModule
                 building_identifier = building_identifier,
                 room_id = player.room_id,
                 timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
-                sender = ctx.Sender,
+                sender_user_id = user_id,
+                sender_username = player.username,
                 width = width,
                 height = height,
                 image_data = image_data
@@ -144,30 +180,38 @@ public static partial class CommunicationModule
     [Reducer]
     public static void LockImageBroadcast(ReducerContext ctx, string building_identifier)
     {
-        var player = ctx.Db.online_player.identity.Find(ctx.Sender) ?? throw new Exception("Player not found");
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player must be in a room to lock image broadcast");
 
-        // make sure player is in the same room as image
-        Images images = ctx.Db.images.building_identifier.Find(building_identifier) ?? throw new Exception("Image not found");
-        if (images.room_id != player.room_id)
+        // Validate input
+        if (string.IsNullOrWhiteSpace(building_identifier))
+            throw new Exception("Building identifier is required");
+
+        // Make sure image exists and player is in the same room
+        var image = ctx.Db.images.building_identifier.Find(building_identifier) ?? throw new Exception("Image not found");
+        if (image.room_id != player.room_id)
             throw new Exception("Cannot lock image broadcast for a building that is not in the same room");
 
-        // If identity is in image table, update it else insert
+        // If lock exists, update it, else insert
         var existingLock = ctx.Db.image_broadcast_lock.building_identifier.Find(building_identifier);
         if (existingLock != null)
         {
-            ImageBroadcastLock existingLockValue = existingLock.Value;
-            existingLockValue.sender = ctx.Sender;
-            existingLockValue.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
-            ctx.Db.image_broadcast_lock.building_identifier.Update(existingLockValue);
+            var updatedLock = existingLock.Value;
+            updatedLock.sender_user_id = user_id;
+            updatedLock.sender_username = player.username;
+            updatedLock.timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+            ctx.Db.image_broadcast_lock.building_identifier.Update(updatedLock);
         }
         else
         {
             ctx.Db.image_broadcast_lock.Insert(new ImageBroadcastLock
             {
                 building_identifier = building_identifier,
-                sender = ctx.Sender,
+                sender_user_id = user_id,
+                sender_username = player.username,
                 timestamp = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
             });
         }
