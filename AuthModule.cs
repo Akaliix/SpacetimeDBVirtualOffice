@@ -1,6 +1,4 @@
 ﻿using SpacetimeDB;
-using System.Security.Cryptography;
-using System.Text;
 
 public static partial class AuthModule
 {
@@ -11,8 +9,9 @@ public static partial class AuthModule
         public uint user_id;
 
         [Unique]
-        public string username;
+        public string email;
 
+        public string username; // Display name, not unique
         public string password_hash;
         public string salt;
         public ulong created_at;
@@ -31,27 +30,31 @@ public static partial class AuthModule
     }
 
     [Reducer]
-    public static void Register(ReducerContext ctx, string username, string password)
+    public static void Register(ReducerContext ctx, string email, string username, string password)
     {
         // Validate input
+        if (string.IsNullOrWhiteSpace(email) || email.Length < 5 || email.Length > 100 || !email.Contains("@"))
+            throw new Exception("Email must be a valid email address");
+
         if (string.IsNullOrWhiteSpace(username) || username.Length < 3 || username.Length > 50)
             throw new Exception("Username must be between 3 and 50 characters");
 
         if (string.IsNullOrWhiteSpace(password) || password.Length < 6)
             throw new Exception("Password must be at least 6 characters");
 
-        // Check if username already exists
-        var existingUser = ctx.Db.user_account.username.Find(username);
+        // Check if email already exists
+        var existingUser = ctx.Db.user_account.email.Find(email);
         if (existingUser != null)
-            throw new Exception("Username already exists");
+            throw new Exception("Email already exists");
 
         // Generate salt and hash password
-        string salt = GenerateSalt();
+        string salt = GenerateSalt(ctx);
         string passwordHash = HashPassword(password, salt);
 
         // Create user account
         var newUser = ctx.Db.user_account.Insert(new UserAccount
         {
+            email = email,
             username = username,
             password_hash = passwordHash,
             salt = salt,
@@ -59,25 +62,25 @@ public static partial class AuthModule
             last_login = 0
         });
 
-        Log.Info($"User registered: {username} with ID: {newUser.user_id}");
+        Log.Info($"User registered: {email} with username {username} and ID: {newUser.user_id}");
     }
 
     [Reducer]
-    public static void Login(ReducerContext ctx, string username, string password)
+    public static void Login(ReducerContext ctx, string email, string password)
     {
         // Validate input
-        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
-            throw new Exception("Username and password are required");
+        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
+            throw new Exception("Email and password are required");
 
         // Find user account
-        var userAccount = ctx.Db.user_account.username.Find(username);
+        var userAccount = ctx.Db.user_account.email.Find(email);
         if (userAccount == null)
-            throw new Exception("Invalid username or password");
+            throw new Exception("Invalid email or password");
 
         // Verify password
         string passwordHash = HashPassword(password, userAccount.Value.salt);
         if (passwordHash != userAccount.Value.password_hash)
-            throw new Exception("Invalid username or password");
+            throw new Exception("Invalid email or password");
 
         // Update last login time
         var updatedUser = userAccount.Value;
@@ -104,7 +107,7 @@ public static partial class AuthModule
             });
         }
 
-        Log.Info($"User logged in: {username} (ID: {userAccount.Value.user_id})");
+        Log.Info($"User logged in: {email} (ID: {userAccount.Value.user_id})");
     }
 
     [Reducer]
@@ -145,23 +148,18 @@ public static partial class AuthModule
         return ctx.Db.user_account.user_id.Find(user_id);
     }
 
-    private static string GenerateSalt()
+    private static string GenerateSalt(ReducerContext ctx)
     {
         byte[] saltBytes = new byte[32];
-        using (var rng = RandomNumberGenerator.Create())
-        {
-            rng.GetBytes(saltBytes);
-        }
+        ctx.Rng.NextBytes(saltBytes);
         return Convert.ToBase64String(saltBytes);
     }
 
     private static string HashPassword(string password, string salt)
     {
-        using (var sha256 = SHA256.Create())
-        {
-            byte[] saltedPassword = Encoding.UTF8.GetBytes(password + salt);
-            byte[] hash = sha256.ComputeHash(saltedPassword);
-            return Convert.ToBase64String(hash);
-        }
+        var hash = new HashCode();
+        hash.Add(password);
+        hash.Add(salt);
+        return hash.ToHashCode().ToString("X");
     }
 }

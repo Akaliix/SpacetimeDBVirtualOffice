@@ -216,4 +216,52 @@ public static partial class CommunicationModule
             });
         }
     }
+
+    // Helper function to update communication records when username changes
+    public static void UpdateCommunicationUsername(ReducerContext ctx, uint user_id, string new_username)
+    {
+        // Update recent chat messages (last 24 hours) with new username
+        ulong cutoffTime = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch - (24UL * 60UL * 60UL * 1000000UL); // 24 hours ago
+
+        foreach (var message in ctx.Db.chat_message.Iter())
+        {
+            if (message.sender_user_id == user_id && message.timestamp > cutoffTime)
+            {
+                var updatedMessage = message;
+                updatedMessage.sender_username = new_username;
+                ctx.Db.chat_message.message_id.Update(updatedMessage);
+            }
+        }
+
+        // Update voice clips with new username
+        var voiceClip = ctx.Db.voice_clip.sender_user_id.Find(user_id);
+        if (voiceClip != null)
+        {
+            var updatedVoice = voiceClip.Value;
+            updatedVoice.sender_username = new_username;
+            ctx.Db.voice_clip.sender_user_id.Update(updatedVoice);
+        }
+
+        // Update image records with new username
+        foreach (var image in ctx.Db.images.Iter())
+        {
+            if (image.sender_user_id == user_id)
+            {
+                var updatedImage = image;
+                updatedImage.sender_username = new_username;
+                ctx.Db.images.building_identifier.Update(updatedImage);
+            }
+        }
+
+        // Update image broadcast locks with new username
+        foreach (var lockRecord in ctx.Db.image_broadcast_lock.Iter())
+        {
+            if (lockRecord.sender_user_id == user_id)
+            {
+                var updatedLock = lockRecord;
+                updatedLock.sender_username = new_username;
+                ctx.Db.image_broadcast_lock.building_identifier.Update(updatedLock);
+            }
+        }
+    }
 }
