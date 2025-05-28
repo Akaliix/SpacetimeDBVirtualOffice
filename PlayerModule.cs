@@ -21,6 +21,9 @@ public static partial class PlayerModule
 
         public DbVector3 last_position;
         public float last_rotation;
+
+        // Animation sync fields
+        public uint current_animation_state; // "idle", "walk", "jump", "sit"
     }
 
     [Table(Name = "player_count", Public = true)]
@@ -157,15 +160,34 @@ public static partial class PlayerModule
     }
 
     [Reducer]
-    public static void UpdateLastPosition(ReducerContext ctx, DbVector3 position, float rotation)
+    public static void UpdateLastPosition(ReducerContext ctx, DbVector3 position, float rotation, uint animationState)
     {
         uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
 
         var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
         if (player.room_id == uint.MaxValue)
             throw new Exception("Player must join a room first");
+
         player.last_position = position;
         player.last_rotation = rotation;
+        player.current_animation_state = animationState;
+
+        ctx.Db.online_player.user_id.Update(player);
+    }
+
+    // Keep the old UpdateLastPosition for backward compatibility
+    [Reducer]
+    public static void UpdateLastPositionLegacy(ReducerContext ctx, DbVector3 position, float rotation)
+    {
+        uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
+
+        var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
+        if (player.room_id == uint.MaxValue)
+            throw new Exception("Player must join a room first");
+
+        player.last_position = position;
+        player.last_rotation = rotation;
+
         ctx.Db.online_player.user_id.Update(player);
     }
 
