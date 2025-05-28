@@ -10,14 +10,7 @@ public static partial class RoomModule
         public string name;
         public uint created_by_user_id; // Track who created the room
         public ulong created_at;
-    }
-
-    [Table(Name = "game_room_secret")]
-    public partial struct GameRoomSecret
-    {
-        [PrimaryKey]
-        public uint room_id;
-        public string password;
+        public string password; // Added password field
     }
 
     [Table(Name = "room_entity", Public = true)]
@@ -65,45 +58,49 @@ public static partial class RoomModule
         {
             name = room_name,
             created_by_user_id = user_id,
-            created_at = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch
+            created_at = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
+            password = password // Store password in game_room
         };
 
-        var result = ctx.Db.game_room.Insert(newRoom);
-
-        // Insert the password into the private table
-        ctx.Db.game_room_secret.Insert(new GameRoomSecret
-        {
-            room_id = result.room_id,
-            password = password
-        });
+        ctx.Db.game_room.Insert(newRoom);
 
         Log.Info($"Room created: {room_name} by user {user_id}");
     }
 
     [Reducer]
-    public static void JoinRoom(ReducerContext ctx, uint room_id, string password)
+    public static void JoinRoom(ReducerContext ctx, string room_name, string password)
     {
         uint user_id = AuthModule.GetAuthenticatedUserId(ctx);
 
-        var room = ctx.Db.game_room.room_id.Find(room_id) ?? throw new Exception("Room not found");
-        var roomSecret = ctx.Db.game_room_secret.room_id.Find(room_id) ?? throw new Exception("Room secret not found");
+        // Find the room by name
+        GameRoom? room = null;
+        foreach (var r in ctx.Db.game_room.Iter())
+        {
+            if (r.name == room_name)
+            {
+                room = r;
+                break;
+            }
+        }
+        if (room == null)
+            throw new Exception("Room not found");
 
-        if (roomSecret.password != password)
+        if (room.Value.password != password)
             throw new Exception("Incorrect password");
 
         var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
 
-        var key = MakeKey(user_id, room_id);
+        var key = MakeKey(user_id, room.Value.room_id);
         var savedPos = ctx.Db.player_room_position.user_room_key.Find(key);
 
         var updatedPlayer = player;
-        updatedPlayer.room_id = room_id;
+        updatedPlayer.room_id = room.Value.room_id;
         updatedPlayer.last_position = savedPos?.last_position ?? new DbVector3(0, 0, 0);
         updatedPlayer.last_rotation = savedPos?.last_rotation ?? 0;
         updatedPlayer.last_room_join_time = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
         ctx.Db.online_player.user_id.Update(updatedPlayer);
 
-        Log.Info($"User {user_id} joined room {room_id}");
+        Log.Info($"User {user_id} joined room {room.Value.room_id}");
     }
 
     [Reducer]
