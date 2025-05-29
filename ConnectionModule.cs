@@ -34,6 +34,24 @@ public static partial class ConnectionModule
             {
                 ulong currentTime = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
 
+                // --- Room statistics: handle disconnect from room ---
+                if (player.Value.room_id != uint.MaxValue)
+                {
+                    // --- Session history: close active session on disconnect ---
+                    foreach (var room_session_history in ctx.Db.room_session_history.Iter())
+                    {
+                        if (room_session_history.user_id == user_id && room_session_history.room_id == player.Value.room_id && room_session_history.exit_time == 0)
+                        {
+                            var updatedRoomSession = room_session_history;
+                            updatedRoomSession.exit_time = currentTime;
+                            updatedRoomSession.duration_microseconds = currentTime - room_session_history.entry_time;
+                            ctx.Db.room_session_history.session_id.Update(updatedRoomSession);
+                            break;
+                        }
+                    }
+                }
+                // --- End room statistics ---
+
                 // Move to logged out players table
                 var existingLoggedOut = ctx.Db.logged_out_player.user_id.Find(user_id);
                 if (existingLoggedOut != null)
@@ -116,5 +134,12 @@ public static partial class ConnectionModule
         ctx.Db.player_count.id.Update(count);
 
         Log.Info($"Online player created: {userAccount.username} (ID: {user_id})");
+    }
+
+    [Reducer]
+    public static void GetCurrentTime(ReducerContext ctx)
+    {
+        // log the user identity for debugging
+        Log.Info($"Current time requested by: {ctx.Sender}");
     }
 }

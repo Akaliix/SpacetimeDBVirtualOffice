@@ -1,4 +1,5 @@
-﻿using SpacetimeDB;
+﻿#pragma warning disable STDB_UNSTABLE
+using SpacetimeDB;
 
 public static partial class RoomModule
 {
@@ -9,6 +10,7 @@ public static partial class RoomModule
         public uint room_id;
         public string name;
         public uint created_by_user_id; // Track who created the room
+        public Identity creator_identity;
         public ulong created_at;
         public string password; // Added password field
     }
@@ -36,6 +38,39 @@ public static partial class RoomModule
         public ulong last_updated;
     }
 
+    [Table(Name = "room_session_history", Public = true)]
+    public partial struct RoomSessionHistory
+    {
+        [PrimaryKey, AutoInc]
+        public uint session_id;
+        public uint user_id;
+        public string user_name; // Optional: store username for easier queries
+
+        [SpacetimeDB.Index.BTree]
+        public uint room_id;
+        public ulong entry_time;
+        public ulong exit_time; // 0 if session is still active
+        public ulong duration_microseconds; // Calculated when session ends
+    }
+
+    [SpacetimeDB.ClientVisibilityFilter]
+    public static readonly Filter ROOM_SESSION_FILTER = new Filter.Sql(@"
+        SELECT s.*
+        FROM room_session_history s
+        JOIN game_room r ON s.room_id = r.room_id
+        WHERE r.creator_identity = :sender
+    ");
+    /*
+    
+    For current user to see their own sessions. Add to last line above.
+
+               OR s.user_id IN (
+               SELECT us.user_id 
+               FROM user_session us 
+               WHERE us.identity = :sender
+           )
+    */
+
     [Reducer]
     public static void CreateRoom(ReducerContext ctx, string room_name, string password)
     {
@@ -58,6 +93,7 @@ public static partial class RoomModule
         {
             name = room_name,
             created_by_user_id = user_id,
+            creator_identity = ctx.Sender,
             created_at = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
             password = password // Store password in game_room
         };
@@ -88,6 +124,13 @@ public static partial class RoomModule
         if (room.Value.password != password)
             throw new Exception("Incorrect password");
 
+        if (room.Value.created_by_user_id == user_id && room.Value.creator_identity != ctx.Sender)
+        {
+            var updatedRoom = room.Value;
+            updatedRoom.creator_identity = ctx.Sender;
+            ctx.Db.game_room.room_id.Update(updatedRoom);
+        }
+
         var player = ctx.Db.online_player.user_id.Find(user_id) ?? throw new Exception("Player not found");
 
         var key = MakeKey(user_id, room.Value.room_id);
@@ -99,6 +142,18 @@ public static partial class RoomModule
         updatedPlayer.last_rotation = savedPos?.last_rotation ?? 0;
         updatedPlayer.last_room_join_time = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
         ctx.Db.online_player.user_id.Update(updatedPlayer);
+
+        // --- Room statistics: record entry ---
+        ctx.Db.room_session_history.Insert(new RoomSessionHistory
+        {
+            user_id = user_id,
+            user_name = updatedPlayer.username, // Store username for easier queries
+            room_id = room.Value.room_id,
+            entry_time = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch,
+            exit_time = 0, // Active session
+            duration_microseconds = 0
+        });
+        // --- End room statistics ---
 
         Log.Info($"User {user_id} joined room {room.Value.room_id}");
     }
@@ -144,6 +199,22 @@ public static partial class RoomModule
         updatedPlayer.last_position = new DbVector3(0, 0, 0);
         updatedPlayer.last_rotation = 0;
         ctx.Db.online_player.user_id.Update(updatedPlayer);
+
+        // --- Session history: close active session ---
+        // Find and close the active session for this user in this room
+        ulong now = (ulong)ctx.Timestamp.MicrosecondsSinceUnixEpoch;
+        foreach (var session in ctx.Db.room_session_history.Iter())
+        {
+            if (session.user_id == user_id && session.room_id == player.room_id && session.exit_time == 0)
+            {
+                var updatedSession = session;
+                updatedSession.exit_time = now;
+                updatedSession.duration_microseconds = now - session.entry_time;
+                ctx.Db.room_session_history.session_id.Update(updatedSession);
+                break;
+            }
+        }
+        // --- End statistics ---
     }
 
     [Reducer]
